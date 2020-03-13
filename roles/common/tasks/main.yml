@@ -1,0 +1,37 @@
+# Gerenciamento de pacotes e atualização do sistema operacional
+
+#- name: Atualizaco do sistema operacional
+#  yum: name=* state=latest update_cache=yes
+#
+# Instalacao dos pacotes YUM   
+#- name: Instalacao dos pacotes YUM
+#  yum:
+#    name: "{{ packages }}"
+#    state: latest
+#  vars:
+#    packages:
+#       - net-tools
+#       - vim
+#       - nmap
+#--------------------Debian-------------------------------------------------------------------#
+
+
+
+#----------------------------------------------------------------------------------------------#
+# Instalacao_Pacotes_debian
+- name: Instalacao dos pacotes Debian
+  apt:
+    name: "{{ packages }}"
+    state: latest
+  vars:
+    packages:
+      - net-tools
+      - vim
+      - nmap
+      - tcpdump
+      - tzdata
+      - apache2
+#-----------------------------------------------------------------------------------------------#
+# Configuracao Timezone
+- name: Configurando Timezone
+  file: src=/usr/share/zoneinfo/America/Sao_Paulo dest=/etc/localtime state=link force=yes
