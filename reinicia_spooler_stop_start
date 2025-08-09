@@ -1,0 +1,12 @@
+- name: Reiniciar serviço de spooler no Windows
+  hosts: windows
+  gather_facts: true
+  tasks:
+    - name: Para o serviço de spooler
+      ansible.windows.win_service:
+        name: spooler
+        state: stopped
+    - name: Inicia o servico do spooler
+      ansible.windows.win_service:
+       name: spooler
+       state: started
