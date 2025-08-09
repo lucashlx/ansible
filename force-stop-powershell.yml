@@ -1,0 +1,68 @@
+# Parando o servico elegante. aguarda e mata e inicia (tudo no powershell )
+# via modulos ansible estavam travando quando estava stopando.
+# Testado via nssm
+---
+- name: Graceful stop -> wait -> force kill -> start
+  hosts: windows
+  gather_facts: no
+
+  vars:
+    # passe via -e 'play_service=NomeDoServico'
+    play_service: "NoteHangSvc"
+
+  tasks:
+    - name: Normalizar nome do serviço
+      ansible.builtin.set_fact:
+        svc: "{{ play_service }}"
+
+    - name: Tentar parar e AGUARDAR um pouco
+      ansible.windows.win_shell: |
+        $name = "{{ svc }}"
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if (-not $svc) {
+          Write-Output "NOTFOUND"
+          exit 0
+        }
+
+        # tenta parar (sem falhar se já estiver parado)
+        Stop-Service -Name $name -ErrorAction SilentlyContinue
+
+        # aguarda até 30s (10x de 3s) pelo estado Stopped
+        $tries = 10
+        for ($i=0; $i -lt $tries; $i++) {
+          $status = (Get-Service -Name $name).Status
+          if ($status -eq 'Stopped') {
+            Write-Output "STOPPED"
+            exit 0
+          }
+          Start-Sleep -Seconds 3
+        }
+        # se chegou aqui, ainda não parou
+        Write-Output "RUNNING"
+      register: stop_wait
+      changed_when: true
+      failed_when: false
+
+    - name: Force kill se ainda estiver rodando
+      ansible.windows.win_shell: |
+        $name = "{{ svc }}"
+        $svc = Get-WmiObject Win32_Service -Filter "Name='$name'"
+        if ($svc -and $svc.ProcessId -ne 0) {
+          Write-Host "Matando PID $($svc.ProcessId)"
+          Stop-Process -Id $svc.ProcessId -Force -ErrorAction SilentlyContinue
+          Write-Host "Processo finalizado com força."
+        } else {
+          Write-Host "Sem processo ativo para matar."
+        }
+      when: "'RUNNING' in stop_wait.stdout"
+      register: force_kill
+      failed_when: false
+
+    - name: Iniciar o serviço novamente (se existir)
+      ansible.windows.win_service:
+        name: "{{ svc }}"
+        state: started
+        start_mode: auto
+      when: "'NOTFOUND' not in stop_wait.stdout"
+      register: service_start
+      failed_when: false
