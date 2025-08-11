@@ -1,0 +1,146 @@
+---
+# Play: controla um serviço Windows — tenta parar, espera, força kill se precisar e depois inicia
+- name: Stop Windows service with force kill and then start
+  hosts: windows                # inventário/host group com conexão WinRM funcional
+  gather_facts: no              # desliga facts (ganho de tempo/menos tráfego winrm)
+  collections:
+    - ansible.windows           # garante módulos win_* disponíveis
+
+  vars:
+    service_name: "NoteHangSvc" # nome do serviço alvo
+    graceful_wait_seconds: 15   # tempo para aguardar parada “limpa” após Stop-Service
+    kill_wait_seconds: 5        # tempo para confirmar que parou depois do kill
+    start_wait_seconds: 10      # tempo para aguardar o serviço subir após Start-Service
+    poll_ms: 500                # intervalo de pooling nas verificações (meio segundo)
+
+  tasks:
+    # ===================== FASE 1: STOP (com kill se necessário) =====================
+    - name: Stop and force-kill if needed
+      ansible.windows.win_shell: |
+        # --- parâmetros vindos de vars ---
+        $Name = '{{ service_name }}'
+        $Grace = [int]{{ graceful_wait_seconds }}
+        $KillWait = [int]{{ kill_wait_seconds }}
+        $Poll = [int]{{ poll_ms }}
+
+        # 1) verifica se o serviço existe (Get-Service retorna $null se não achar com -EA SilentlyContinue)
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if (-not $svc) {
+          Write-Output "NotPresent"   # não existe ⇒ tratamos como sucesso (nada a fazer)
+          exit 0
+        }
+
+        # 2) se não está parado, tenta parada “graceful”
+        if ($svc.Status -ne 'Stopped') {
+          try { Stop-Service -Name $Name -ErrorAction SilentlyContinue } catch {}
+          # 3) espera até $Grace segundos o status mudar para Stopped
+          $deadline = (Get-Date).AddSeconds($Grace)
+          while ((Get-Date) -lt $deadline) {
+            $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+            if (-not $svc -or $svc.Status -eq 'Stopped') { 
+              Write-Output "StoppedGracefully"  # parou dentro da janela
+              exit 0 
+            }
+            Start-Sleep -Milliseconds $Poll
+          }
+
+          # 4) ainda rodando? força kill usando o PID do processo vinculado ao serviço
+          # Observação: Get-Service NÃO expõe PID; por isso usamos Win32_Service (CIM/WMI) para pegar ProcessId
+          $cim = Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
+          if ($cim -and $cim.ProcessId -ne 0) {
+            try {
+              Stop-Process -Id $cim.ProcessId -Force -ErrorAction Stop  # kill de verdade
+              # 5) confirma parada após o kill por até $KillWait segundos
+              $deadline2 = (Get-Date).AddSeconds($KillWait)
+              while ((Get-Date) -lt $deadline2) {
+                $svc2 = Get-Service -Name $Name -ErrorAction SilentlyContinue
+                if (-not $svc2 -or $svc2.Status -eq 'Stopped') { 
+                  Write-Output "KilledAndStopped" 
+                  exit 0 
+                }
+                Start-Sleep -Milliseconds $Poll
+              }
+              Write-Output "KillTimedOut"      # matou o PID, mas o serviço não reportou Stopped a tempo
+              exit 3
+            } catch {
+              # erro ao matar o processo: sem privilégios, processo zumbi, etc.
+              Write-Output "KillFailed: $($_.Exception.Message)"
+              exit 4
+            }
+          } else {
+            # sem PID (pode ter parado entre checagens) — consideramos OK
+            Write-Output "NoPIDFoundOrAlreadyStopped"
+            exit 0
+          }
+        } else {
+          # já estava parado no início
+          Write-Output "AlreadyStopped"
+          exit 0
+        }
+      register: ps_stop_kill
+
+      # changed_when: marca mudança quando de fato houve ação (parou grace ou matou e parou)
+      changed_when: >
+        ps_stop_kill.rc == 0 and
+        ("StoppedGracefully" in ps_stop_kill.stdout or
+         "KilledAndStopped" in ps_stop_kill.stdout)
+
+      # failed_when: só falha em códigos != 0 (ex.: 3=timeout, 4=erro no kill)
+      failed_when: ps_stop_kill.rc != 0
+
+    # ===================== FASE 2: START (subir e aguardar Running) =====================
+    - name: Start service and wait until running
+      ansible.windows.win_shell: |
+        $Name = '{{ service_name }}'
+        $StartWait = [int]{{ start_wait_seconds }}
+        $Poll = [int]{{ poll_ms }}
+
+        # 1) verifica existência novamente (pode ter sido removido)
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if (-not $svc) {
+          Write-Output "NotPresent"  # nada a iniciar; não é erro
+          exit 0
+        }
+
+        # 2) se não está Running, tenta iniciar
+        if ($svc.Status -ne 'Running') {
+          try { 
+            Start-Service -Name $Name -ErrorAction Stop 
+          } catch {
+            # Start falhou: dependências, conta, binário inválido, etc.
+            Write-Output "StartFailed: $($_.Exception.Message)"
+            exit 5
+          }
+
+          # 3) aguarda até $StartWait segundos o status ficar Running
+          $deadline = (Get-Date).AddSeconds($StartWait)
+          while ((Get-Date) -lt $deadline) {
+            $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+            if ($svc.Status -eq 'Running') { 
+              Write-Output "StartedOK" 
+              exit 0 
+            }
+            Start-Sleep -Milliseconds $Poll
+          }
+
+          Write-Output "StartTimedOut"  # não subiu a tempo
+          exit 6
+        } else {
+          # já estava Running
+          Write-Output "AlreadyRunning"
+          exit 0
+        }
+      register: ps_start
+
+      # changed_when: marca mudança quando efetivamente subiu agora
+      changed_when: ps_start.rc == 0 and "StartedOK" in ps_start.stdout
+
+      # failed_when: falha apenas em códigos != 0 (ex.: 5=StartFailed, 6=StartTimedOut)
+      failed_when: ps_start.rc != 0
+
+    # ===================== LOG/DIAGNÓSTICO =====================
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg: |
+          Stop phase: {{ ps_stop_kill.stdout }}
+          Start phase: {{ ps_start.stdout }}
