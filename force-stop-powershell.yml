@@ -1,6 +1,7 @@
 # Parando o servico elegante. aguarda e mata e inicia (tudo no powershell )
 # via modulos ansible estavam travando quando estava stopando.
 # Testado via nssm
+# Funcionou, mas deixou de funcionar, ainda nao sei pq...
 ---
 - name: Graceful stop -> wait -> force kill -> start
   hosts: windows
