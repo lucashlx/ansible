@@ -1,0 +1,31 @@
+- name: Atualizar pacotes no Rocky Linux
+  hosts: linux
+  become: true
+  tasks:
+    - name: Instalar utilitário que fornece needs-restarting
+      ansible.builtin.dnf:
+        name: yum-utils
+        state: present
+
+    - name: Upgrade all packages
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+
+    - name: Gerar relatório de pacotes atualizados
+      ansible.builtin.command: dnf history info last
+      register: dnf_history
+      changed_when: false     # relatório apenas informativo
+      failed_when: false      # não falhar se não houver histórico
+
+    - name: Verificar se precisa de reboot (Rocky/RHEL)
+      ansible.builtin.command: needs-restarting -r
+      register: reboot_check
+      changed_when: false
+      failed_when: false      # rc=1 indica reboot necessário; não trate como erro
+
+    - name: Mostrar status de reboot
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Reboot necessário' if reboot_check.rc|default(0) == 1
+             else 'Reboot NÃO é necessário' }}
